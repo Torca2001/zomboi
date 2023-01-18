@@ -26,6 +26,9 @@ colours = {
     "Medical": (229, 128, 151),
     "RestaurantsAndEntertainment": (245, 225, 60),
     "RetailAndCommercial": (184, 205, 84),
+    "no": (255, 100, 100),
+    "wood": (87, 33, 0),
+    "gravel": (135, 135, 135),
 }
 
 pathsToTry = [
@@ -52,65 +55,143 @@ class MapHandler(commands.Cog):
         else:
             self.bot.log.info(f"Maps path: {self.mapsPath}")
 
+        self.mapName = os.getenv("MAP_NAME")
+        if self.mapName is None or len(self.mapName) == 0:
+            self.mapName = "Muldraugh, KY"
+        elif not Path(self.mapsPath + (f"/{self.mapName}/")).is_dir():
+            self.bot.log.error(f"Map name {self.mapName} not found, check map path or map name")
+            self.mapName = "Muldraugh, KY"
+
+        self.loadWorkshopMaps()
+
+
+    def loadWorkshopMaps(self):
+        # load workshop maps and check they match for the map
+        workshopMaps = os.getenv("WORKSHOP_PATH")
+        files = []
+
+        mainForestMap = self.mapsPath + (f"/{self.mapName}/worldmap-forest.xml")
+        if os.path.isfile(mainForestMap):
+            files.append(mainForestMap)
+        mainMap = self.mapsPath + (f"/{self.mapName}/worldmap.xml")
+        if os.path.isfile(mainMap):
+            files.append(mainMap)
+
+        if workshopMaps is not None and len(workshopMaps) > 0:
+            mapsInfo = glob.glob(workshopMaps + "/**/map.info", recursive=True)
+            for mapInfo in mapsInfo:
+                try:
+                    with open(mapInfo, "r", encoding="utf-8", errors="replace") as f:
+                        fileContent = f.read()
+
+                        # Check if this mod file is for the map we are using
+                        if f"lots={self.mapName}" in fileContent:
+                            worldForest = mapInfo.replace("map.info", "worldmap-forest.xml")
+                            if os.path.isfile(worldForest):
+                                files.append(worldForest)
+                            worldMap = mapInfo.replace("map.info", "worldmap.xml")
+                            if os.path.isfile(worldMap):
+                                files.append(worldMap)
+                except Exception as e:
+                    self.bot.log.error(f"Error reading map info {mapInfo}: {e}")
+                    
+        #Parse each map xml and store for use later
+        for file in files:
+            try:
+                tree = ET.parse(file)
+                root = tree.getroot()
+                self.mapTreeRoots.append(root)
+            except Exception as e:
+                self.bot.log.error(f"Error parsing map file {file}: {e}")
+
     @commands.command()
-    async def location(self, ctx, name=None):
+    async def location(self, ctx, name=None, mapSize = None):
         """Get the last known location of the given user"""
         if name is None:
             name = ctx.author.name
-        user = self.bot.get_cog("UserHandler").getUser(name)
+        user = self.bot.get_cog("UserHandler").getUserAuto(name)
+
+        if user is None:
+            await ctx.reply(f"User {name} not found")
+            return
+        
+        name = user.name
+
         x = int(user.lastLocation[0])
         y = int(user.lastLocation[1])
+
+        result = self.bot.get_cog("UserHandler").getDBLoc(name)
+        if result is not None:
+            x = result[0]
+            y = result[1]
+
         chunkSize = 300
+
+
+        mapWidth = 3
+        playerSize = 2
+
+        if mapSize is not None:
+            try:
+                newSize = int(mapSize)
+                if newSize > 39:
+                    newSize = 39
+                mapWidth = newSize
+            except ValueError:
+                print("\nPlease only use integers")
+
+        if (mapWidth % 2) == 0:
+            mapWidth += 1
+        if (mapWidth < 1):
+            mapWidth = 1
+
+        drawSize = chunkSize * mapWidth
+
         cellx = x // chunkSize
         celly = y // chunkSize
-        posX = x % chunkSize
-        posY = y % chunkSize
+        posX = x % chunkSize + (mapWidth // 2) * chunkSize
+        posY = y % chunkSize + (mapWidth // 2) * chunkSize
 
-        image = Image.new("RGB", (chunkSize, chunkSize), colours["default"])
+        image = Image.new("RGB", (drawSize, drawSize), colours["default"])
         draw = ImageDraw.Draw(image)
 
-        tree = ET.parse(self.mapsPath + ("/Muldraugh, KY/worldmap.xml"))
-        root = tree.getroot()
-        for cell in root.findall("cell"):
-            if int(cell.get("x")) == cellx and int(cell.get("y")) == celly:
-                for feature in cell.findall("feature"):
-                    for geometry in feature.findall("geometry"):
-                        if geometry.get("type") == "Polygon":
-                            for coordinates in geometry.findall("coordinates"):
-                                points = []
-                                for point in coordinates.findall("point"):
-                                    points.append(
-                                        (int(point.get("x")), int(point.get("y")))
-                                    )
-                            for properties in feature.findall("properties"):
-                                for property in properties.findall("property"):
-                                    draw.polygon(
-                                        points, fill=colours[property.get("value")]
-                                    )
+        for root in self.mapTreeRoots:
+            for cell in root.findall("cell"):
+                currX = int(cell.get("x"))
+                currY = int(cell.get("y"))
+                if ((currX + (mapWidth // 2) >= cellx and currX - (mapWidth // 2) <= cellx) and 
+                    (currY + (mapWidth // 2) >= celly and currY - (mapWidth // 2) <= celly)):
+                    cellOffsetX = (currX - cellx + (mapWidth // 2)) * chunkSize
+                    cellOffsetY = (currY - celly + (mapWidth // 2)) * chunkSize
+                    for feature in cell.findall("feature"):
+                        for geometry in feature.findall("geometry"):
+                            if geometry.get("type") == "Polygon":
+                                for coordinates in geometry.findall("coordinates"):
+                                    points = []
+                                    for point in coordinates.findall("point"):
+                                        points.append(
+                                            (cellOffsetX + int(point.get("x")), cellOffsetY + int(point.get("y")))
+                                        )
+                                for properties in feature.findall("properties"):
+                                    for property in properties.findall("property"):
+                                        if property.get("value") not in colours:
+                                            self.bot.log.info(f'Tile not recognised {property.get("value")} name: {property.get("name")}')
+                                        else:
+                                            draw.polygon(
+                                                points, fill=colours[property.get("value")]
+                                            )
 
-        draw.polygon(
-            (
-                (posX - 1, posY - 1),
-                (posX + 1, posY - 1),
-                (posX + 1, posY + 1),
-                (posX - 1, posY + 1),
-            ),
-            (255, 0, 0),
-        )
-
-        image = image.rotate(270)
+            draw.polygon(
+                (
+                    (posX - playerSize, posY - playerSize),
+                    (posX + playerSize, posY - playerSize),
+                    (posX + playerSize, posY + playerSize),
+                    (posX - playerSize, posY + playerSize),
+                ),
+                (255, 0, 0),
+            )
         image.save("map.png")
-        sinceSeen = datetime.now() - user.lastSeen
-        if sinceSeen.seconds < 60:
-            timeString = "less than a minute"
-        elif sinceSeen.seconds < 60 * 60:
-            minutes = sinceSeen.seconds // 60
-            timeString = f"{minutes} minute{'s' if minutes > 1 else ''}"
-        else:
-            hours = sinceSeen.seconds // (60 * 60)
-            timeString = f"over {hours} hour{'s' if hours > 1 else ''}"
-
         await ctx.send(
             file=discord.File("map.png"),
-            content=f"{name} was last seen {timeString} ago",
+            content=f"{name} was last seen <t:{round(datetime.timestamp(user.lastSeen))}:R>",
         )
