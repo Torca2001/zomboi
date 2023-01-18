@@ -10,6 +10,8 @@ from tabulate import tabulate
 from typing import List
 from pathlib import Path
 import sqlite3
+from utils import utils
+import difflib
 
 DISCORD_MAX_CHAR = 2000
 
@@ -52,6 +54,40 @@ class UserHandler(commands.Cog):
         timestampStr, message = line.strip()[1:].split("]", 1)
         timestamp = datetime.strptime(timestampStr, "%d-%m-%y %H:%M:%S.%f")
         return timestamp, message
+
+    def getDBLoc(self, name: str):
+        try:
+            playerdb = Path(os.getenv("SAVES_PATH")).joinpath("players.db") if os.getenv("SAVES_PATH") else Path.home().joinpath("Zomboid/Saves/Multiplayer/pzserver").joinpath("players.db")
+            if not playerdb.is_file():
+                self.bot.log.error("Zomboid saves path was set incorrectly. Please check your environment variables")
+                return None
+            con = sqlite3.connect(str(playerdb))
+            cur = con.cursor()
+            cur.execute('SELECT x, y FROM networkPlayers WHERE username = ?', [name])
+            result = cur.fetchone()
+            con.close()
+            if result is not None:
+                return (result[0], result[1])
+        except Exception as e:
+            self.bot.log.error(e)
+            return None
+    
+    def getUserAuto(self, name: str):
+        """Get a user from a name, will try to snap to a name if it doesn't exist"""
+        if name in self.users:
+            return self.users[name]
+        else:
+            included = None
+            lowerName = name.lower()
+            for n in self.users:
+                lowerUser = n.lower()
+                if lowerUser == lowerName:
+                    return self.users[n]
+                elif included is None and lowerName in lowerUser:
+                    included = self.users[n]
+            if included is not None:
+                return included
+        return None
 
     def getCharName(self, name: str):
         """Looks through the db file to find the name of the user's character"""
@@ -192,9 +228,17 @@ class UserHandler(commands.Cog):
         Provide a username, or leave blank to show the user matching your discord name
         """
         if name is None:
+            name = ctx.author.nick
+
+        if name is None:
             name = ctx.author.name
-        if name in self.users:
-            user = self.users[name]
+
+        user = self.getUserAuto(name)
+
+        if user is None:
+            await ctx.send("User " + name + " does not exist\n")
+        else:
+            name = user.name
             table = []
             table.append(["Name", user.name])
             table.append(
@@ -209,4 +253,6 @@ class UserHandler(commands.Cog):
             for perk in user.perks:
                 if int(user.perks[perk]) != 0:
                     table.append([perk, user.perks[perk]])
-            await ctx.send(f'```\n{tabulate(table, tablefmt="fancy_grid")}\n```')
+
+            for msg in utils.splitMessage(tabulate(table, tablefmt="fancy_grid"), DISCORD_MAX_CHAR - 10):
+                await ctx.send(f'```\n{msg}\n```')
